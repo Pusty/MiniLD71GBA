@@ -24,13 +24,14 @@
 #define WORLD_SIZE_Y 32
 
 #define AMOUNT_ENTITIES 16
+#define AMOUNT_MAPS 3
 
 
 #define ENTITY_NONE 0
 #define ENTITY_ENEMY 1
 #define ENTITY_PLATFORM 2
 #define ENTITY_COIN 3
-
+#define ENTITY_MP_PLAYER 4
 
 #define SPRITE_PLAYER_STANDING_LEFT 0x00
 #define SPRITE_PLAYER_MOVING0_LEFT  0x02
@@ -56,6 +57,8 @@
 #define TILE_ENEMY 0xE
 #define TILE_ENEMY2 0xF
 
+
+
 typedef struct ENTITY {
     int id;
     int x;
@@ -63,6 +66,7 @@ typedef struct ENTITY {
     union {
        int start;
        int animation_tick;
+       int mp_player_map;
     };
     int end;
     int velocity;
@@ -91,8 +95,8 @@ int scrollx; // moving the background X
 int scrolly; // moving the background Y
 int playercamX; // moving the player on the screen
 
-int freeze = false; //freeze for first input
-int coins = 0; // coins collected
+int freeze = true; //freeze for first input
+int coins[AMOUNT_MAPS] = {0}; // coins collected
 int animTick = 0; // global animation tick
 
 int mapIndex = 0; // current map index
@@ -100,8 +104,14 @@ int nextMap = 0; // next map to load
 const unsigned short* map; // pointer to current loaded flat map
 int loading = 0; // is loading
 
+
+int coinEntitiesIndex = 0;
+ENTITY* coinEntities[7];
+
 PLAYER player;
+ENTITY mp_players[4];
 ENTITY entities[AMOUNT_ENTITIES];
+
 
 
 // map
@@ -112,6 +122,8 @@ OBJ_AFFINE *obj_aff_buffer= (OBJ_AFFINE*)obj_buffer;
 
 void initData() {
     memset32(entities, 0, (AMOUNT_ENTITIES*sizeof(ENTITY))/4);
+    memset32(mp_players, 0, (4*sizeof(ENTITY))/4);
+    coinEntitiesIndex = 0;
     player.sprite = SPRITE_PLAYER_STANDING_RIGHT;
     player.sprite_obj = &obj_buffer[0];
     player.velocityX = 0;
@@ -133,10 +145,11 @@ void drawWorld() {
     (player.sprite_obj)->attr2= ((player.sprite_obj)->attr2&~ATTR2_ID_MASK) | ATTR2_ID(player.sprite&0xFF);
     obj_set_pos(player.sprite_obj, 112+playercamX, 96);
 
-
+    int screenOffsetX = (INITIAL_SCREEN_OFFSET_X - playercamX - 96);
+    screenOffsetX = (player.x+screenOffsetX-16);
+    int screenOffsetY =  (player.y+INITIAL_SCREEN_OFFSET_Y+16);
+    
     for(int e=0;e<AMOUNT_ENTITIES;e++) {
-        
-        
         if(entities[e].id == ENTITY_ENEMY) {
             if(entities[e].velocity == 1) 
                 if((entities[e].x/5)%2==0)
@@ -162,13 +175,19 @@ void drawWorld() {
         
         if(entities[e].id != 0) {
            (entities[e].sprite_obj)->attr2= ((entities[e].sprite_obj)->attr2&~ATTR2_ID_MASK) | ATTR2_ID(entities[e].sprite&0xFF);
-           int screenOffsetX = (INITIAL_SCREEN_OFFSET_X - playercamX - 96);
            
            // If 9th bit is set, flip the sprite on the x axis
            (entities[e].sprite_obj)->attr1 &= ~ATTR1_HFLIP;
            if((entities[e].sprite>>8)&1) (entities[e].sprite_obj)->attr1 |= ATTR1_HFLIP;
            
-           obj_set_pos(entities[e].sprite_obj, entities[e].x - (player.x+screenOffsetX-16), entities[e].y - (player.y+INITIAL_SCREEN_OFFSET_Y+16));
+           obj_set_pos(entities[e].sprite_obj, entities[e].x - screenOffsetX, entities[e].y - screenOffsetY);
+        }
+    }
+    
+    for(int e=0;e<4;e++) {
+        if(mp_players[e].id != 0) {
+           (mp_players[e].sprite_obj)->attr2= ((mp_players[e].sprite_obj)->attr2&~ATTR2_ID_MASK) | ATTR2_ID(mp_players[e].sprite&0xFF);
+           obj_set_pos(mp_players[e].sprite_obj, mp_players[e].x - screenOffsetX, mp_players[e].y - screenOffsetY);
         }
     }
 }
@@ -182,7 +201,7 @@ void addEntity(int id,int x,int y,int st,int en) {
         entities[e].start = st;
         entities[e].end = en;
         entities[e].velocity = 1;
-        entities[e].sprite_obj = &obj_buffer[e+1];
+        entities[e].sprite_obj = &obj_buffer[e+5]; // player + 4 mp players
         if(id == ENTITY_ENEMY) {
             entities[e].sprite = SPRITE_ENEMY_0;
             obj_set_attr(entities[e].sprite_obj, ATTR0_SQUARE, ATTR1_SIZE_8, ATTR2_PALBANK(0) | (entities[e].sprite&0xFF) | ATTR2_PRIO(1)); // enemy
@@ -192,15 +211,16 @@ void addEntity(int id,int x,int y,int st,int en) {
         }else if(id == ENTITY_COIN) {
             entities[e].sprite = SPRITE_COIN_0;
             obj_set_attr(entities[e].sprite_obj, ATTR0_SQUARE, ATTR1_SIZE_8, ATTR2_PALBANK(0) | (entities[e].sprite&0xFF) | ATTR2_PRIO(1));  // coin
+            coinEntities[coinEntitiesIndex++] = &entities[e];
         }
         
         return;
     }
 }
 
-void removeEntity(int id) {
-    entities[id].id = ENTITY_NONE; 
-    obj_hide(entities[id].sprite_obj);
+void removeEntity(ENTITY* entity) {
+    entity->id = ENTITY_NONE; 
+    obj_hide(entity->sprite_obj);
 }
 
 void initWorld() {
@@ -208,7 +228,9 @@ void initWorld() {
     scrollx = INITIAL_SCREEN_OFFSET_X; // moving the background X 
     scrolly = INITIAL_SCREEN_OFFSET_Y; // moving the background Y
     playercamX = -96; // moving the player on the screen
-    coins = 0;
+    
+    coins[mapIndex] = 0;
+    
     animTick = 0;
 
     for(int x=0;x<WORLD_SIZE_X;x++) 
@@ -288,8 +310,11 @@ int collisionEntities(int tempX, int tempY) {
             }
         }else if(entities[e].id == ENTITY_COIN) {
             if(tempX+9>=entities[e].x && tempX<=entities[e].x +7 && tempY+15>=entities[e].y && tempY<=entities[e].y+7) {
-                removeEntity(e); // pickup coin!
-                coins++;
+                removeEntity(&entities[e]); // pickup coin!
+                for(int i=0;i<7;i++) {
+                    if(&entities[e] == coinEntities[i])
+                        coins[mapIndex] |= (1<<i);
+                }
                 mmEffect(SFX_COIN);
             }
         
@@ -374,25 +399,250 @@ void setWorld(int index) {
 void handleEntities() {
     for(int e=0;e<AMOUNT_ENTITIES;e++)
         if(entities[e].id == ENTITY_ENEMY || entities[e].id == ENTITY_PLATFORM) {
-            entities[e].x=entities[e].x+entities[e].velocity;
-            if(entities[e].x<=entities[e].start || entities[e].x >= entities[e].end) 
-                entities[e].velocity = -entities[e].velocity;
+            
+            int distance = (entities[e].end-entities[e].start);
+            int toveral  = (animTick/2) % (distance*2);
+            if(toveral >= distance) {
+                entities[e].x = entities[e].end - (toveral-distance);
+                entities[e].velocity = -1;
+            } else {
+                entities[e].x = entities[e].start + (toveral);
+                entities[e].velocity = 1;
+            }
+            
+            //entities[e].x=entities[e].x+entities[e].velocity;
+            //if(entities[e].x<=entities[e].start || entities[e].x >= entities[e].end) 
+            //    entities[e].velocity = -entities[e].velocity;
         }else if(entities[e].id == ENTITY_COIN) {
             entities[e].animation_tick = (entities[e].animation_tick+1) % 100;
         }
 }
 
+
+#define PACKET_CONNECT   0x00
+#define PACKET_PLAYER_X0 0x01
+#define PACKET_PLAYER_X1 0x02
+#define PACKET_PLAYER_Y0 0x03
+#define PACKET_PLAYER_Y1 0x04
+#define PACKET_PLAYER_SPRITE 0x05
+#define PACKET_WORLD 0x06
+
+#define PACKET_COINS0 0x07
+#define PACKET_COINS1 0x08
+#define PACKET_COINS2 0x09
+
+#define PACKET_ANIMTICK0 0x0A
+#define PACKET_ANIMTICK1 0x0B
+
+int should_send_next_index = 0;
+
+int link_is_master() {
+    return !(REG_SIOCNT&SIOM_SLAVE);
+}
+int link_is_ready() {
+    return (REG_SIOCNT&SIOM_CONNECTED);
+}
+int link_has_error() {
+    return (REG_SIOCNT&SIOM_ERROR);
+}
+int link_is_sending() {
+    return (REG_SIOCNT&SION_ENABLE);
+}
+int link_get_id() {
+    return (REG_SIOCNT&SIOM_ID_MASK)>>SIOM_ID_SHIFT;
+}
+
+void link_init_player(int id) {
+     mp_players[id].x = 16;
+     mp_players[id].y = 8*30;
+     mp_players[id].id = ENTITY_MP_PLAYER;
+     mp_players[id].sprite_obj = &obj_buffer[1+id];
+     mp_players[id].sprite = SPRITE_PLAYER_STANDING_RIGHT;
+     obj_set_attr(mp_players[id].sprite_obj, ATTR0_SQUARE, ATTR1_SIZE_16, ATTR2_PALBANK((id%3)+1) | (mp_players[id].sprite&0xFF) | ATTR2_PRIO(1));  // multiplayer-player
+}
+
+
+void handle_packet(unsigned int id, unsigned short packet) {
+    int packetData = packet&0xFF;
+    int packetID   = (packet>>8)&0xFF;
+    
+    if(id > 4) return;
+    if(packetID == 0xFF) return; // default data = 0xFFFF -> ERROR
+    if(id == link_get_id()) return;
+    
+    if(mp_players[id].id == ENTITY_NONE)
+        link_init_player(id);
+    
+    int coinWorldID = -1;
+    
+    switch(packetID) {
+        case PACKET_PLAYER_X0:
+            mp_players[id].x = (mp_players[id].x&(~0xFF)) | packetData;
+            break;
+        case PACKET_PLAYER_X1:
+            mp_players[id].x = (mp_players[id].x&(~0xFF00)) | (packetData<<8);
+            break;
+        case PACKET_PLAYER_Y0:
+            mp_players[id].y = (mp_players[id].y&(~0xFF)) | packetData;
+            break;
+        case PACKET_PLAYER_Y1:
+            mp_players[id].y = (mp_players[id].y&(~0xFF00)) | (packetData<<8);
+            break;
+        case PACKET_PLAYER_SPRITE:
+            mp_players[id].sprite = packetData;
+            break;
+        case PACKET_ANIMTICK0:
+            if(id != 0) break; // only sync to master
+            animTick = (animTick&(~0xFF)) | packetData; 
+            break;
+        case PACKET_ANIMTICK1:
+            if(id != 0) break; // only sync to master
+            animTick = (animTick&(~0xFF00)) | (packetData<<8); 
+            break; 
+        case PACKET_WORLD:
+            mp_players[id].mp_player_map = packetData; // dd
+            break; 
+        case PACKET_COINS0:
+            coinWorldID = 0;
+            goto PACKET_COINS_PROCESS;
+        case PACKET_COINS1:
+            coinWorldID = 1;
+            goto PACKET_COINS_PROCESS;
+        case PACKET_COINS2:
+            coinWorldID = 2;
+            goto PACKET_COINS_PROCESS;
+        PACKET_COINS_PROCESS:
+            //if(mp_players[id].mp_player_map != mapIndex) break;
+            if(mapIndex != coinWorldID) break;
+            if(coins[coinWorldID] >= packetData) break;
+            for(int i=0;i < 7;i++) {
+                if(((packetData>>i)&1) && coinEntities[i]->id != ENTITY_NONE) {
+                    removeEntity(coinEntities[i]); // pickup coin!
+                    coins[coinWorldID] |= (1<<i);
+                    mmEffect(SFX_COIN);
+                }
+            }
+            break;
+        default:
+            break;
+    }
+        
+    
+        
+
+        
+}
+
+
+
+void link_init() {
+    
+    REG_RCNT = R_MODE_GPIO;
+    REG_RCNT = R_MODE_MULTI;
+    REG_SIOCNT       = SIOU_38400;
+    REG_SIOMLT_SEND  = 0;
+    
+    REG_SIOCNT |= SIO_MODE_MULTI;
+    REG_SIOCNT |= SIO_IRQ;
+}
+
+void link_send(unsigned short data) {
+    REG_SIOMLT_SEND = data;
+    if(link_is_master())
+        REG_SIOCNT |= SION_ENABLE;
+}
+
+
+
+void link_send_player() {
+    if(loading > 0 || freeze) return;
+    
+    switch(should_send_next_index%7) {
+        case 0:
+            link_send((player.x&0xFF) | (PACKET_PLAYER_X0<<8)); 
+            break;
+        case 1:
+            link_send(((player.x>>8)&0xFF) | (PACKET_PLAYER_X1<<8)); 
+            break;
+        case 2:
+            link_send((player.y&0xFF) | (PACKET_PLAYER_Y0<<8)); 
+            break;
+        case 3:
+            link_send(((player.y>>8)&0xFF) | (PACKET_PLAYER_Y1<<8)); 
+            break;
+        case 4:
+            link_send(((player.sprite)&0xFF) | (PACKET_PLAYER_SPRITE<<8)); 
+            break;
+        case 5:
+            if(should_send_next_index/7 == 0)
+                link_send(((animTick)&0xFF) | (PACKET_ANIMTICK0<<8)); 
+            else
+                link_send(((mapIndex)&0xFF) | (PACKET_WORLD<<8)); 
+            break;
+        case 6:
+            if(should_send_next_index/7 == 0)
+                link_send(((animTick>>8)&0xFF) | (PACKET_ANIMTICK1<<8)); 
+            else {
+                if(should_send_next_index%3 == 0)
+                    link_send(((coins[0])&0xFF) | (PACKET_COINS0<<8)); 
+                else if(should_send_next_index%3 == 1)
+                    link_send(((coins[1])&0xFF) | (PACKET_COINS1<<8)); 
+                else if(should_send_next_index%3 == 2)
+                    link_send(((coins[2])&0xFF) | (PACKET_COINS2<<8)); 
+            }
+            break;
+        default:
+            break;
+    }
+    
+    should_send_next_index = (should_send_next_index + 1) % (7*128);
+   // should_send_next = false;
+    //should_send_next_timer = 0;
+}
+
+
+void link_irq_serial() {
+    
+    if (!link_is_ready() || link_has_error()) {
+      link_init();
+      return;
+    }
+    
+    for(int i=0;i<4;i++)
+        handle_packet(i, REG_SIOMULTI[i]);
+    
+    if(!link_is_master())
+        link_send_player();
+}
+
+void link_irq_timer() {
+    if(link_is_master())
+        link_send_player();
+}
+
 int main()
 {
     vid_page= vid_mem;
+    freeze = true;
+
  
 	irq_init(NULL);
 	irq_add(II_VBLANK, mmVBlank);
+    irq_add(II_SERIAL, link_irq_serial);
+    irq_add(II_TIMER3, link_irq_timer);
+    
+
+    link_init();
+    
+    REG_TM[3].start = -50;
+    REG_TM[3].cnt = TM_ENABLE | TM_IRQ | TM_FREQ_1024;
+    
     
     mmInitDefault((mm_addr)soundbank_bin, 8);
     
     mmSetModuleVolume(1024);
     mmSetJingleVolume(1024);
+    
 	
 	pal_bg_mem[255]= CLR_WHITE;
 
@@ -402,11 +652,11 @@ int main()
     
     // Load sprite pallette, and tiles into CB 4
     memcpy32(pal_obj_mem, sprites_4objPal, sprites_4objPalLen/4);
+    
+    
     memcpy32(&tile_mem[4][0], sprites_4objTiles, sprites_4objTilesLen/4);
     
     
-    freeze = true;
-
 	// init video mode
 	REG_DISPCNT= DCNT_MODE4 | DCNT_BG2 | DCNT_OBJ;
     
@@ -431,6 +681,7 @@ int main()
            key_hit(KI_L) ||
            key_tri_horz() != 0 ||
            key_tri_vert() != 0) {
+            loading = 10*3;
             freeze = false;
         }
 
@@ -455,7 +706,6 @@ int main()
     
 
     nextMap = 0;
-    loading = 10*3;
     
 
     // Scroll around some
@@ -511,7 +761,7 @@ int main()
             mmEffect(SFX_JUMP);
         }
         
-        if(player.is_moving && !player.is_jumping && player.is_on_ground && player.in_moving == 0 && otriv != -1) {
+        if(player.is_moving && !player.is_jumping && player.is_on_ground && player.in_moving == 1 && otriv != -1) {
              mmEffect(SFX_STEP);
         }
 
@@ -522,7 +772,7 @@ int main()
             continue;
         }*/
         
-        if(coins>=7) {
+        if(coins[mapIndex] == 0x7F) {
             mapIndex++;
             if(mapIndex > 2) {
                 mapIndex = 0;
@@ -552,7 +802,7 @@ int main()
 
         player.velocityX = velXP;
         handleVel();
-        if((animTick&1) == 0) handleEntities();  
+        if((animTick&1) == 0) handleEntities();
         
 
         if(player.velocityX!=0 && player.is_moving)
@@ -597,12 +847,18 @@ int main()
         
         tte_write("#{P:2,0}");
         char str[32];
-        siprintf(str, "%1d/%1d Chipsets Level: %1d", coins, 7, mapIndex+1);
+        
+        int coin_count = 0;
+        for(int i=0;i<7;i++)
+            if(((coins[mapIndex]>>i)&1) == 1) 
+                coin_count++;
+        
+        siprintf(str, "%1d/%1d Chipsets Level: %1d", coin_count, 7, mapIndex+1);
         tte_write(str);
             
         mmFrame();
-        oam_copy(oam_mem, obj_buffer, AMOUNT_ENTITIES);
-
+        oam_copy(oam_mem, obj_buffer, AMOUNT_ENTITIES+1+4);
+        
     }
 
     return 0;
